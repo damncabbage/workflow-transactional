@@ -12,24 +12,37 @@ module Workflow
           read_attribute(self.class.workflow_column)
         end
 
-        # On transition the new workflow state is immediately saved in the
-        # database.
+        # On transition the new workflow state is immediately saved in the database.
+        # Emulates state_machine by explicitly saving the entire record.
         def persist_workflow_state(new_value)
-          # Emulate state_machine. :(
+          column = self.class.workflow_column
+          old_value = self[column]
+          self[column] = new_value
+
           # If the record hasn't been created yet, ignore the locking logic
           # entirely and fall back to the previous behaviour.
-          if self.new_record?
-            self[self.class.workflow_column] = new_value
-            return save
-          end
-          return false if invalid?
+          return save! if self.new_record?
+          raise ActiveRecord::RecordInvalid.new(self) if invalid?
 
-          if self.respond_to? :update_column
-            # Rails 3.1 or newer
-            update_column self.class.workflow_column, new_value
-          else
-            # older Rails; beware of side effect: other (pending) attribute changes will be persisted too
-            update_attribute self.class.workflow_column, new_value
+          lock_without_reload do
+            rows = self.class.where(id: id, column => old_value)
+                             .update_all(column => new_value)
+
+            # TODO: Explictly allow two (a -> b) updates to happen simultaneously
+            #       if 1) the transition is marked to allow this, and 2) the end
+            #       result is the same.
+
+            # Always explode if the UPDATE failed; it means when we've tried to
+            # update state a -> state b, someone else has already beat us and
+            # updated a -> c or something.
+            raise ::ActiveRecord::StaleObjectError.new(self, 'experiment') if rows == 0
+
+            # Explicitly go on to save the record normally; this is emulating
+            # the normal state_machine transition behaviour, which everything
+            # written up until now expects.
+            # (Ideally this entire thing would be patterned after ActiveRecord::Locking::Implicit,
+            # but that's basically impossible without monkey-patching AR directly.)
+            save!
           end
         end
 
@@ -42,6 +55,24 @@ module Workflow
         # initial state in all the new records.
         def write_initial_state
           write_attribute self.class.workflow_column, current_state.to_s if self[self.class.workflow_column].nil?
+        end
+
+        # ActiveRecord::Locking#lock unfortunately explicitly reloads the record
+        # before going on to grab the lock. This avoids this.
+        def lock_without_reload(&block)
+          return unless block_given?
+
+          # SELECT id FROM <table> WHERE id = <id> FOR UPDATE
+          # Prevents any other process affect this row until the end of the
+          table = self.class.arel_table
+          self.class.connection.execute(
+            table.from(table) # Bizarre, but directly from Arel's tests.
+                 .project(:id) # SELECT id
+                 .where(table[:id].eq(id))
+                 .lock # Implicitly a FOR UPDATE lock.
+                 .to_sql
+          )
+          yield
         end
       end
 
