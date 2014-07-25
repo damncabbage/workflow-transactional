@@ -2,6 +2,7 @@ require 'rubygems'
 
 require 'workflow/specification'
 require 'workflow/adapters/active_record'
+require 'workflow/adapters/active_record_locking'
 require 'workflow/adapters/remodel'
 
 # See also README.markdown for documentation
@@ -263,7 +264,7 @@ module Workflow
     klass.extend ClassMethods
 
     if Object.const_defined?(:ActiveRecord) && klass < ActiveRecord::Base
-      klass.send :include, Adapter::ActiveRecord
+      klass.send :include, Adapter::ActiveRecordLocking
     end
     if Object.const_defined?(:Remodel) && klass < Adapter::Remodel::Entity
       klass.send :include, Adapter::Remodel::InstanceMethods
